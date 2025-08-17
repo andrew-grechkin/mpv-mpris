@@ -57,6 +57,7 @@ static const char *introspection_xml =
     "    <property name=\"Metadata\" type=\"a{sv}\" access=\"read\"/>\n"
     "    <property name=\"Volume\" type=\"d\" access=\"readwrite\"/>\n"
     "    <property name=\"Position\" type=\"x\" access=\"read\"/>\n"
+    "    <property name=\"Chapter\" type=\"x\" access=\"read\"/>\n"
     "    <property name=\"MinimumRate\" type=\"d\" access=\"read\"/>\n"
     "    <property name=\"MaximumRate\" type=\"d\" access=\"read\"/>\n"
     "    <property name=\"CanGoNext\" type=\"b\" access=\"read\"/>\n"
@@ -287,13 +288,13 @@ static gchar* try_get_youtube_thumbnail(char *path)
 
 static gchar* get_cache_dir() {
     gchar *cache_dir = g_build_filename(g_get_user_cache_dir(), "mpv-mpris", "coverart", NULL);
-    
+
     if (g_mkdir_with_parents(cache_dir, 0755) < 0) {
         g_warning("Failed to create cache directory: %s", g_strerror(errno));
         g_free(cache_dir);
         return NULL;
     }
-    
+
     return cache_dir;
 }
 
@@ -308,14 +309,14 @@ static gchar* extract_embedded_art(AVFormatContext *context, const char *media_p
     AVPacket *packet = NULL;
     gchar *cache_path = NULL;
     gchar *uri = NULL;
-    
+
     for (unsigned int i = 0; i < context->nb_streams; i++) {
         if (context->streams[i]->disposition & AV_DISPOSITION_ATTACHED_PIC) {
             packet = &context->streams[i]->attached_pic;
             break;
         }
     }
-    
+
     if (!packet) {
         return NULL;
     }
@@ -328,10 +329,10 @@ static gchar* extract_embedded_art(AVFormatContext *context, const char *media_p
     gchar *cache_filename = generate_cache_filename(media_path);
     cache_path = g_build_filename(cache_dir, cache_filename, NULL);
     g_free(cache_filename);
-    
+
     if (!g_file_test(cache_path, G_FILE_TEST_EXISTS)) {
         GError *error = NULL;
-        if (!g_file_set_contents(cache_path, (const gchar*)packet->data, 
+        if (!g_file_set_contents(cache_path, (const gchar*)packet->data,
                                 packet->size, &error)) {
             g_warning("Failed to write cover art to cache: %s", error->message);
             g_error_free(error);
@@ -342,7 +343,7 @@ static gchar* extract_embedded_art(AVFormatContext *context, const char *media_p
     }
 
     uri = g_filename_to_uri(cache_path, NULL, NULL);
-    
+
     g_free(cache_path);
     g_free(cache_dir);
     return uri;
@@ -352,7 +353,7 @@ static gchar* try_get_embedded_art(char *path)
 {
     gchar *uri = NULL;
     AVFormatContext *context = NULL;
-    
+
     if (!avformat_open_input(&context, path, NULL, NULL)) {
         uri = extract_embedded_art(context, path);
         avformat_close_input(&context);
@@ -456,7 +457,13 @@ static GVariant *create_metadata(UserData *ud)
     // initial value. Replaced with metadata value if available
     add_metadata_item_string(ud->mpv, &dict, "media-title", "xesam:title");
 
-    add_metadata_item_string(ud->mpv, &dict, "metadata/by-key/Title", "xesam:title");
+    int64_t chapter = 0;
+    if (mpv_get_property(ud->mpv, "chapter", MPV_FORMAT_INT64, (void*)&chapter) == 0) {
+		add_metadata_item_string(ud->mpv, &dict, "chapter-metadata/by-key/Title", "xesam:title");
+	} else {
+		add_metadata_item_string(ud->mpv, &dict, "metadata/by-key/Title", "xesam:title");
+	}
+	add_metadata_item_string(ud->mpv, &dict, "metadata/by-key/Title", "xesam:titleTrack");
     add_metadata_item_string(ud->mpv, &dict, "metadata/by-key/Album", "xesam:album");
     add_metadata_item_string(ud->mpv, &dict, "metadata/by-key/Genre", "xesam:genre");
 
@@ -651,11 +658,47 @@ static void method_call_player(G_GNUC_UNUSED GDBusConnection *connection,
         g_dbus_method_invocation_return_value(invocation, NULL);
 
     } else if (g_strcmp0(method_name, "Next") == 0) {
+        int64_t chapters = 0;
+        if (mpv_get_property(ud->mpv, "chapters", MPV_FORMAT_INT64, (void*)&chapters) == 0 && chapters) {
+            int64_t chapter = 0;
+            if (mpv_get_property(ud->mpv, "chapter", MPV_FORMAT_INT64, (void*)&chapter) == 0) {
+                if ((chapter + 1) < chapters) {
+                    {
+                        const char *cmd[] = {"write-watch-later-config", NULL};
+                        mpv_command_async(ud->mpv, 0, cmd);
+                    }
+                    {
+                        const char *cmd[] = {"add", "chapter", "+1", NULL};
+                        mpv_command_async(ud->mpv, 0, cmd);
+                    }
+                    g_dbus_method_invocation_return_value(invocation, NULL);
+                    return;
+                }
+            }
+        }
         const char *cmd[] = {"playlist_next", NULL};
         mpv_command_async(ud->mpv, 0, cmd);
         g_dbus_method_invocation_return_value(invocation, NULL);
 
     } else if (g_strcmp0(method_name, "Previous") == 0) {
+        int64_t chapters = 0;
+        if (mpv_get_property(ud->mpv, "chapters", MPV_FORMAT_INT64, (void*)&chapters) == 0 && chapters) {
+            int64_t chapter = 0;
+            if (mpv_get_property(ud->mpv, "chapter", MPV_FORMAT_INT64, (void*)&chapter) == 0) {
+                if ((chapter - 1) >= 0) {
+                    {
+                        const char *cmd[] = {"write-watch-later-config", NULL};
+                        mpv_command_async(ud->mpv, 0, cmd);
+                    }
+                    {
+                        const char *cmd[] = {"add", "chapter", "-1", NULL};
+                        mpv_command_async(ud->mpv, 0, cmd);
+                    }
+                    g_dbus_method_invocation_return_value(invocation, NULL);
+                    return;
+                }
+            }
+        }
         const char *cmd[] = {"playlist_prev", NULL};
         mpv_command_async(ud->mpv, 0, cmd);
         g_dbus_method_invocation_return_value(invocation, NULL);
@@ -715,6 +758,10 @@ static GVariant *get_property_player(G_GNUC_UNUSED GDBusConnection *connection,
     if (g_strcmp0(property_name, "PlaybackStatus") == 0) {
         ret = g_variant_new_string(ud->status);
 
+    } else if (g_strcmp0(property_name, "Chapter") == 0) {
+        int64_t chapter = 0;
+		mpv_get_property(ud->mpv, "chapter", MPV_FORMAT_INT64, &chapter);
+		ret = g_variant_new_int64(chapter);
     } else if (g_strcmp0(property_name, "LoopStatus") == 0) {
         ret = g_variant_new_string(ud->loop_status);
 
@@ -725,7 +772,7 @@ static GVariant *get_property_player(G_GNUC_UNUSED GDBusConnection *connection,
 
     } else if (g_strcmp0(property_name, "Shuffle") == 0) {
         int shuffle;
-        mpv_get_property(ud->mpv, "playlist-shuffle", MPV_FORMAT_FLAG, &shuffle);
+        mpv_get_property(ud->mpv, "shuffle", MPV_FORMAT_FLAG, &shuffle);
         ret = g_variant_new_boolean(shuffle);
 
     } else if (g_strcmp0(property_name, "Metadata") == 0) {
@@ -815,7 +862,7 @@ static gboolean set_property_player(G_GNUC_UNUSED GDBusConnection *connection,
 
     } else if (g_strcmp0(property_name, "Shuffle") == 0) {
         int shuffle = g_variant_get_boolean(value);
-        mpv_set_property(ud->mpv, "playlist-shuffle", MPV_FORMAT_FLAG, &shuffle);
+        mpv_set_property(ud->mpv, "shuffle", MPV_FORMAT_FLAG, &shuffle);
 
     } else if (g_strcmp0(property_name, "Volume") == 0) {
         double volume = g_variant_get_double(value);
@@ -983,8 +1030,9 @@ static void handle_property_change(const char *name, void *data, UserData *ud)
         prop_name = "PlaybackStatus";
         prop_value = set_playback_status(ud);
 
-    } else if (g_strcmp0(name, "media-title") == 0 ||
-               g_strcmp0(name, "duration") == 0) {
+    } else if (g_strcmp0(name, "media-title") == 0
+               || g_strcmp0(name, "duration") == 0
+               ||g_strcmp0(name, "chapter") == 0) {
         // Free existing metadata object
         if (ud->metadata) {
             g_variant_unref(ud->metadata);
@@ -1158,6 +1206,7 @@ int mpv_open_cplugin(mpv_handle *mpv)
     mpv_observe_property(mpv, 0, "volume", MPV_FORMAT_DOUBLE);
     mpv_observe_property(mpv, 0, "loop-file", MPV_FORMAT_STRING);
     mpv_observe_property(mpv, 0, "loop-playlist", MPV_FORMAT_STRING);
+    mpv_observe_property(mpv, 0, "chapter", MPV_FORMAT_INT64);
     mpv_observe_property(mpv, 0, "duration", MPV_FORMAT_INT64);
     mpv_observe_property(mpv, 0, "fullscreen", MPV_FORMAT_FLAG);
 
